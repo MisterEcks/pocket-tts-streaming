@@ -1,0 +1,32 @@
+name: "Pocket TTS Streaming"
+description: "Ultra-low latency streaming TTS using PocketTTS and the Wyoming protocol."
+version: "1.0.0"
+slug: "pocket_tts_streaming"
+init: false
+arch:
+  - aarch64
+  - amd64
+options:
+  hf_token: ""
+  voice: "alba"
+  log_level: "info"
+  s2s_quick_yield_single_sentence_fragment: true
+  s2s_minimum_sentence_length: 15
+  s2s_minimum_first_fragment_length: 10
+  enable_phonetic_dict: true
+  pytorch_threads: 4
+  speaker_tail_padding: 0.3
+schema:
+  hf_token: str
+  voice: str
+  log_level: list(debug|info|warning|error)
+  s2s_quick_yield_single_sentence_fragment: bool
+  s2s_minimum_sentence_length: int
+  s2s_minimum_first_fragment_length: int
+  enable_phonetic_dict: bool
+  pytorch_threads: int(1,)
+  speaker_tail_padding: float(0,)
+ports:
+  10201/tcp: 10201
+map:
+  - share:rw
