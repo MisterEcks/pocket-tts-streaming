@@ -15,6 +15,8 @@ RUN pip install --no-cache-dir \
 RUN pip install --no-cache-dir \
     wyoming>=1.8.0 \
     watchdog \
+    zeroconf \
+    stream2sentence \
     safetensors \
     numpy
 
