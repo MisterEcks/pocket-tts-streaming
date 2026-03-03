@@ -4,7 +4,6 @@ import json
 import logging
 import os
 import re
-import socket
 import time
 import wave
 import numpy as np
@@ -23,8 +22,6 @@ from wyoming.server import AsyncEventHandler, AsyncServer
 from wyoming.tts import (Synthesize, SynthesizeStart, SynthesizeStop, 
                          SynthesizeChunk)
 from wyoming.event import Event
-from zeroconf import ServiceInfo
-from zeroconf.asyncio import AsyncZeroconf
 
 # Optimize for inference
 torch.set_grad_enabled(False)
@@ -35,7 +32,7 @@ def load_config():
     
     config = {
         "hf_token": os.getenv("HF_TOKEN", ""),
-        "port": int(os.getenv("WYOMING_PORT", 10201)),
+        "port": int(os.getenv("WYOMING_PORT", 10222)),
         "voice": os.getenv("DEFAULT_VOICE", "alba"),
         "log_level": os.getenv("LOG_LEVEL", "info").upper(),
         "data_dir": base_data,
@@ -90,7 +87,7 @@ if CFG["hf_token"]:
 CFG["voices_dir"].mkdir(parents=True, exist_ok=True)
 CFG["models_dir"].mkdir(parents=True, exist_ok=True)
 
-# Apply the configured PyTorch threads
+# Apply the configured PyTorch threads (Ideal for your CPU-only setup)
 torch.set_num_threads(CFG["pytorch_threads"])
 _LOGGER.debug(f"PyTorch threads set to: {CFG['pytorch_threads']}")
 
@@ -331,23 +328,28 @@ class PocketTTSHandler(AsyncEventHandler):
             for sentence in generator:
                 if abort_event.is_set(): break
                 
+                # Extract tags to determine the voice for this sentence
                 tags = tag_pattern.findall(sentence)
-                for tag in tags:
-                    tag = tag.strip().lower()
-                    emotion_voice = f"{current_voice_name}_{tag}"
+                if tags:
+                    # Grab the first tag found in the sentence to set the emotion
+                    tag = tags[0].strip().lower()
+                    emotion_voice = f"{base_voice_name}_{tag}"
                     
                     if tag in ["normal", "default", "reset"]:
                         current_v_state = initial_v_state
                         current_voice_name = base_voice_name
                     elif emotion_voice in self.voice_states:
                         current_v_state = self.voice_states[emotion_voice]
+                        current_voice_name = emotion_voice
                     elif tag in self.voice_states:
                         current_v_state = self.voice_states[tag]
-                        current_voice_name = tag 
-
+                        current_voice_name = tag
+                
+                # Strip ALL tags from the text so they aren't spoken
                 clean_sentence = tag_pattern.sub('', sentence).strip()
                 if not clean_sentence: continue
 
+                # Apply Phonetic Override
                 if CFG["enable_phonetic_dict"] and PRONUNCIATION_DICT:
                     for target_word, phonetic_spelling in PRONUNCIATION_DICT.items():
                         clean_sentence = re.sub(
@@ -357,8 +359,9 @@ class PocketTTSHandler(AsyncEventHandler):
                             flags=re.IGNORECASE
                         )
 
-                _LOGGER.debug(f"Phraser yielded clean sentence: '{clean_sentence}'")
+                _LOGGER.debug(f"Phraser yielded clean sentence: '{clean_sentence}' using voice: {current_voice_name}")
                 
+                # Generate the audio straem..
                 for chunk in self.model.generate_audio_stream(current_v_state, clean_sentence):
                     if abort_event.is_set(): break
                     audio_data = (chunk.clamp(-1.0, 1.0) * 32767).to(torch.int16).cpu().numpy().tobytes()
@@ -374,22 +377,11 @@ class PocketTTSHandler(AsyncEventHandler):
 async def main():
     _LOGGER.info(f"Starting Pocket TTS Streaming on port {CFG['port']}...")
     
-    zeroconf = AsyncZeroconf()
-    host_ip = socket.gethostbyname(socket.gethostname())
-    info = ServiceInfo(
-        "_wyoming._tcp.local.",
-        f"Pocket TTS Streaming @ {socket.gethostname()}._wyoming._tcp.local.",
-        addresses=[socket.inet_aton(host_ip)],
-        port=CFG["port"],
-        properties={"name": "Pocket TTS Streaming", "version": "1.0.0", "voice": CFG["voice"]},
-    )
-    await zeroconf.async_register_service(info)
-
     try:
         _LOGGER.info("Loading Pocket TTS model weights...")
         model = TTSModel.load_model()
         
-        # 1. Process pending .wav files on startup
+        # Process pending .wav files on startup
         for wav_path in CFG["voices_dir"].glob("*.wav"):
             if not wav_path.name.endswith(".done"):
                 _LOGGER.info(f"Found unprocessed wav on startup: {wav_path.name}")
@@ -402,7 +394,7 @@ async def main():
                 except Exception as e:
                     _LOGGER.error(f"Failed to process {wav_path.name} on startup: {e}")
 
-        # 2. Load Initial Base Voices and Safetensors
+        # Load Initial Base Voices and Safetensors
         builtin_voices = [
             "alba", "marius", "javert", "jean", 
             "fantine", "cosette", "eponine", "azelma"
@@ -412,7 +404,7 @@ async def main():
         for p in CFG["voices_dir"].glob("*.safetensors"):
             voice_states[p.stem] = model.get_state_for_audio_prompt(str(p))
         
-        # 3. Group voices for clean logging
+        # Group voices for clean logging
         all_names = set(voice_states.keys())
         voice_tree = {}
         for name in sorted(all_names):
@@ -425,7 +417,7 @@ async def main():
         log_entries = [f"{b} [{', '.join(e)}]" if e else b for b, e in voice_tree.items()]
         _LOGGER.info(f"Ready! Loaded {len(voice_states)} total states: {' | '.join(log_entries)}")
         
-        # 4. Start threads and handlers
+        # Start threads and handlers
         executor, loop = ThreadPoolExecutor(max_workers=4), asyncio.get_running_loop()
         observer = Observer()
         observer.schedule(VoiceFolderHandler(model, voice_states, loop), str(CFG["voices_dir"]))
@@ -436,8 +428,6 @@ async def main():
         
     finally:
         _LOGGER.warning("Service shutting down...")
-        await zeroconf.async_unregister_service(info)
-        await zeroconf.async_close()
         observer.stop()
         observer.join()
         executor.shutdown()
